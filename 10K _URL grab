@@ -1,0 +1,112 @@
+import requests
+from bs4 import BeautifulSoup
+import pandas as pd
+import warnings
+warnings.filterwarnings('ignore')
+import re
+
+
+# functions
+def make_url(base_url, comp):
+    url = base_url
+    # add each component to the base url
+    for r in comp:
+        url = '{}/{}'.format(url, r)
+    return url
+
+
+# reading in cik numbers
+ciks = pd.read_csv(r'C:\Users\syntronic\Desktop\cik_ticker.csv', sep='|', low_memory=False)
+
+head = {
+    'User-Agent': 'Rigveda@cslabs.ai',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
+    'Accept-Charset': 'ISO-8859-1,utf-8;q=0.7,*;q=0.3',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Accept-Language': 'en - IN, en - GB;q = 0.9, en - US;q = 0.8, en;q = 0.7',
+    'Connection': 'keep-alive'}
+
+ticker = 'HD'
+date = '2020-12-31'
+
+
+cik_num = ciks.CIK[ciks.Ticker == ticker].iloc[0]
+
+# base URL for the SEC EDGAR browser
+endpoint = r"https://www.sec.gov/cgi-bin/browse-edgar"
+
+# define our parameters dictionary
+param_dict = {'action': 'getcompany',
+              'CIK': '{}'.format(cik_num),
+              'type': '10-k',
+              'dateb': date,
+              'owner': 'exclude',
+              'start': '',
+              'output': 'atom',
+              'count': '100'}
+
+
+# request the url, and then parse the response.
+response = requests.get(url=endpoint, params=param_dict, headers=head)
+soup_1 = BeautifulSoup(response.content, 'lxml')
+
+# Let the user know it was successful.
+print('First url:', response)
+print(response.url)
+
+# find all the entry tags
+entries = soup_1.find_all('entry')
+
+# initialize our list for storage
+tenk_dict = {}
+
+
+# loop through each found entry, remember this is only the first two
+for entry in entries[0:2]:
+    # grab the accession number so we can create a key value
+    accession_num = entry.find('accession-number').text
+    filing_date = entry.find('filing-date').text
+    filing_type = entry.find('filing-type').text
+
+    # create a new dictionary
+    entry_dict = {}
+    entry_dict['filing_number'] = accession_num
+    entry_dict['filing_date'] = filing_date
+    entry_dict['filing_type'] = filing_type
+
+    # store in the master list
+    tenk_dict[filing_type + ' ' + filing_date] = entry_dict
+
+# creating url from pulled information
+base_url = r'https://www.sec.gov/Archives/edgar/data'
+filing_num = tenk_dict[list(tenk_dict.keys())[0]]['filing_number'].replace('-', '')
+filing_date = tenk_dict[list(tenk_dict.keys())[0]]['filing_date']
+xml_summary = make_url(base_url, [cik_num, filing_num, 'FilingSummary.xml'])
+
+
+# selecting all a base url to select filings
+base_url = xml_summary.replace('FilingSummary.xml', '')
+content = requests.get(xml_summary, headers=head).content
+print('First url:', response)
+soup2 = BeautifulSoup(content, 'lxml')
+reports = soup2.find('myreports')
+instance = str(reports.find_all('report')[0]).split(sep='"')[1]
+
+# creating a clean dictionary for each statement in the 10-K
+file_statements = {}
+for index, report in enumerate(reports.find_all('report')[:-1]):
+    report_dict = {}
+    report_dict['name_short'] = report.shortname.text
+    report_dict['name_long'] = report.longname.text
+    report_dict['position'] = report.position.text
+    report_dict['category'] = report.menucategory.text
+    report_dict['url'] = base_url + report.htmlfilename.text
+    file_statements[index] = report_dict
+
+# Creating a dataframe
+reports_df = pd.DataFrame.from_dict(file_statements)
+reports_df = reports_df.transpose()
+ten_url = base_url + instance
+print(ticker)
+print(reports_df.name_short)
+print(ten_url)
