@@ -1,0 +1,290 @@
+import pandas as pd
+import numpy as np
+import mysql.connector
+
+config = {
+  'host': 'los-test-db.mysql.database.azure.com',
+  'user': 'csladmin@los-test-db',
+  'password': 'csLabs$2019',
+  'database': 'quandl'}
+
+class db_connection():
+
+    def __init__(self, config):
+        self.config = config
+
+    def connect(self):
+        self.db = mysql.connector.connect(**self.config)
+        if self.db:
+            print("Connection Successful")
+        else:
+            print("Connection Failed")
+        self.cursor = self.db.cursor(dictionary=True)
+
+db = db_connection(config)
+
+
+tick = 'ADBE'
+
+def call_table(cursor, table, tick,dropped=True):
+        cursor.execute(f"SELECT * FROM {table} WHERE ticker = '{tick}'")
+        df = pd.DataFrame(cursor.fetchall())
+        if dropped:
+            df = df.drop('index', axis='columns')
+        return df.iloc[-7:, ].reset_index(drop=True)
+
+def calculations(tick):
+    print(tick)
+    print('\n'*5)
+
+
+
+    db.connect()
+    bs, cf = call_table(db.cursor, 'mry_balance_sheet', tick), call_table(db.cursor, 'mry_cash_flow', tick)
+    inc, metrics = call_table(db.cursor, 'mry_income_statement', tick), call_table(db.cursor, 'mry_metrics', tick)
+    bs_extra, cf_extra = round(call_table(db.cursor, 'bsnew', tick, False)), call_table(db.cursor, 'cfnew', tick, False)
+
+
+    # Merge the concerned dfs
+    items = bs.merge(inc, how='left', on=['ticker', 'calendardate', 'reportperiod', 'dimension', 'datekey'])
+    items = items.merge(metrics, how='left', on=['ticker', 'calendardate', 'reportperiod', 'dimension', 'datekey'])
+    items = items.merge(cf, how='left', on=['ticker', 'calendardate', 'reportperiod', 'dimension', 'datekey'])
+    extras = bs_extra.merge(cf_extra, how='left', on=['ticker', 'calendardate'])
+    items = items.merge(extras, how='left', on=['ticker', 'calendardate'])
+    #items.set_index('calendardate',inplace=True)
+
+    # Divide Datasets
+    divider = 1000000
+
+    cols_req = ['cor', 'consolinc', 'ebit', 'ebitusd','gp', 'intexp', 'netinc', 'netinccmn', 'netinccmnusd', 'netincdis',
+                'netincnci', 'opex', 'opinc', 'prefdivis', 'revenue', 'revenueusd', 'rnd', 'sgna', 'shareswa', 'shareswadil',
+                'taxexp', 'sharebas', 'assetsavg', 'ebitda','ebitdausd', 'ebt', 'equityavg', 'ev', 'fcf', 'invcap',
+                'invcapavg', 'marketcap', 'tangibles', 'workingcapital']
+
+    cols = list(bs.iloc[:,5:].columns) + list(cf.iloc[:,5:].columns) + cols_req
+    items[cols] = items[cols] / divider
+
+    # Extract Fields
+    #fields = pd.read_excel(r'C:\Users\syntronic\Desktop\Valuation Files\APPLE_Final.xlsm',sheet_name='Model')
+    #fields = fields.iloc[2:37,0:5]
+    #fields = fields.tolist()
+
+    fields = ['Sales growth', 'COGS/Sales', 'SG&A/Sales', 'Other operating exp/Sales', 'Depreciation/(Net assets+capex)',
+              'Interest rate', 'Minority interest as % of PAT', 'Growth rate of total dividends','Tax rate',
+              'Dividend as a % of cash generated','Receivables/Sales','Inventories/Sales','Investments Current/Sales',
+              'Other Current Assets/Sales','PPE,Gross/Sales','Other Assets,annual growth 1yr','Total assets,4yr CAGR',
+              'CAPEX','Accounts Payable/Sales','Other Current Liabilities/Sales','Short Term Debt/Assets',
+              'Long Term Debt/Assets','Deffered Revenue / Sales','Deferred Taxes / Sales',
+              'Other liabilities,annual growth 1yr','Total liabilities,4yr CAGR']
+
+    # Additional BS Line items to be calculated
+    ####Assets####
+    bs_add = pd.DataFrame()
+    bs_add['calendardate'] = bs['calendardate']
+    bs_add['other_curr_assets'] = items['assetsc']-items['cashneq']-items['receivables']-items['inventory']-items['investmentsc']
+    bs_add['ppegross_abs_chng'] = int(items.iloc[6,-5]) - int(items.iloc[5,-5])
+    bs_add.at[5,'ppegross_abs_chng'] = int(items.iloc[5,-5]) - int(float(items.iloc[4,-5]))
+    bs_add.at[4,'ppegross_abs_chng'] = int(float(items.iloc[4,-5])) - int(float(items.iloc[3,-5]))
+    bs_add.at[3,'ppegross_abs_chng'] = int(float(items.iloc[3,-5])) - int(float(items.iloc[2,-5]))
+    bs_add.at[2,'ppegross_abs_chng'] = int(float(items.iloc[2,-5])) - int(float(items.iloc[1,-5]))
+    bs_add.at[1,'ppegross_abs_chng'] = int(float(items.iloc[1,-5])) - int(float(items.iloc[0,-5]))
+    bs_add.at[0,'ppegross_abs_chng'] = None
+    bs_add['disposals'] = bs_add['ppegross_abs_chng']+items['capex']
+    bs_add['depr_&_amor_accum'] = -((items['ppegross'].astype(float))-items['ppnenet']+items['oper_lease_asset'].fillna(0))
+    bs_add['other_assets'] = items['assets']-items['intangibles']-items['investmentsnc']-items['ppnenet']-items['assetsc']
+
+    ####Liabilities####
+    bs_add['other_curr_liab'] = items['liabilitiesc']-items['payables']-items['debtc']-items['deferredrev']
+    bs_add['debt'] = items['debtnc']-(items['oper_lease_liab'].fillna(0))
+    bs_add['other_liab'] = items['liabilitiesnc']-items['taxliabilities']-items['debtnc']
+
+    ####Equity####
+    bs_add['convr_debt_&_non_cont_int'] = (items['assets']-items['liabilities'])-items['equity']  ## Check
+    bs_add['capital_surplus'] = items['equity']-(items['retearn']+items['accoci'])-bs_add['convr_debt_&_non_cont_int']
+
+    # Additional CF Line items to be calculated
+    cf_add = pd.DataFrame()
+    cf_add['calendardate'] = bs['calendardate']
+    cf_add['net_inc_incl_non_cont_int'] = items['netincnci'] + items['netinc']
+    cf_add['inc_curr_assets'] = (items.iloc[5,29] + items.iloc[5,20] + bs_add.iloc[5,1])-(items.iloc[6,29] + items.iloc[6,20] + bs_add.iloc[6,1])
+    cf_add.at[5,'inc_curr_assets'] = (items.iloc[4,29] + items.iloc[4,20] + bs_add.iloc[4,1])-(items.iloc[5,29] + items.iloc[5,20] + bs_add.iloc[5,1])
+    cf_add.at[4,'inc_curr_assets'] = (items.iloc[3,29] + items.iloc[3,20] + bs_add.iloc[3,1])-(items.iloc[4,29] + items.iloc[4,20] + bs_add.iloc[4,1])
+    cf_add.at[3,'inc_curr_assets'] = (items.iloc[2,29] + items.iloc[2,20] + bs_add.iloc[2,1])-(items.iloc[3,29] + items.iloc[3,20] + bs_add.iloc[3,1])
+    cf_add.at[2,'inc_curr_assets'] = (items.iloc[1,29] + items.iloc[1,20] + bs_add.iloc[1,1])-(items.iloc[2,29] + items.iloc[2,20] + bs_add.iloc[2,1])
+    cf_add.at[1,'inc_curr_assets'] = (items.iloc[0,29] + items.iloc[0,20] + bs_add.iloc[0,1])-(items.iloc[1,29] + items.iloc[1,20] + bs_add.iloc[1,1])
+    cf_add.at[0,'inc_curr_assets'] = None
+    cf_add['inc_curr_liab'] = (items.iloc[6,27]+items.iloc[6,15]+bs_add.iloc[6,6])-(items.iloc[5,27]+items.iloc[5,15]+bs_add.iloc[5,6])
+    cf_add.at[5,'inc_curr_liab'] = (items.iloc[5,27]+items.iloc[5,15]+bs_add.iloc[5,6])-(items.iloc[4,27]+items.iloc[4,15]+bs_add.iloc[4,6])
+    cf_add.at[4,'inc_curr_liab'] = (items.iloc[4,27]+items.iloc[4,15]+bs_add.iloc[4,6])-(items.iloc[3,27]+items.iloc[3,15]+bs_add.iloc[3,6])
+    cf_add.at[3,'inc_curr_liab'] = (items.iloc[3,27]+items.iloc[3,15]+bs_add.iloc[3,6])-(items.iloc[2,27]+items.iloc[2,15]+bs_add.iloc[2,6])
+    cf_add.at[2,'inc_curr_liab'] = (items.iloc[2,27]+items.iloc[2,15]+bs_add.iloc[2,6])-(items.iloc[1,27]+items.iloc[1,15]+bs_add.iloc[1,6])
+    cf_add.at[1,'inc_curr_liab'] = (items.iloc[1,27]+items.iloc[1,15]+bs_add.iloc[1,6])-(items.iloc[0,27]+items.iloc[0,15]+bs_add.iloc[0,6])
+    cf_add.at[0,'inc_curr_liab'] = None
+    cf_add['oth_opr_cf'] = (items['ncfo']-(cf_add['net_inc_incl_non_cont_int']+items['depamor']+items['sbcomp']+cf_add['inc_curr_assets'].fillna(0)+cf_add['inc_curr_liab'].fillna(0)))
+    cf_add['oth_invst_cf'] = items['ncfi']-(items['ncfinv']+items['capex']+items['ncfbus'])
+    cf_add['oth_fin_cf'] = items['ncff']-(items['ncfdebt']+items['ncfcommon']+items['ncfdiv'])
+    cf_add['net_chng_cash'] = items['ncfo']+items['ncfi']+items['ncff']
+    cf_add['cash_year_begin'] = None, items.iloc[0,9],items.iloc[1,9],items.iloc[2,9],items.iloc[3,9],items.iloc[4,9],items.iloc[5,9]
+    cf_add['cash_year_end'] = cf_add['net_chng_cash']+items['ncfx']+ cf_add['cash_year_begin']
+
+    # Additional IncS Line items to be calculated
+    is_add = pd.DataFrame()
+    is_add['calendardate'] = bs['calendardate']
+    is_add['othr_oper_exp'] = items['revenue']-items['cor']-items['sgna']-items['opinc']-items['depamor']
+    is_add['ebit_adj_for_extrord_items'] = items['ebit']-items['netincdis']
+    is_add['othr_inc/exp'] = is_add['ebit_adj_for_extrord_items']-items['opinc']
+    is_add['pretax_inc'] = items['ebit']-items['intexp']
+    is_add['inc_bfr_extrord_items'] = is_add['pretax_inc']-items['taxexp']-items['netincnci']
+    is_add['net_inc'] = is_add['inc_bfr_extrord_items']+items['netincdis']
+    is_add['retained'] = is_add['net_inc']+ items['ncfdiv']
+    is_add['commn_share_cal_eps_b'] = is_add['net_inc']/items['eps']
+    is_add['dil_share_cal_eps_b'] = is_add['net_inc']/items['epsdil']
+    is_add['ebitda'] = (items['revenue']-(items['cor']+items['sgna']+is_add['othr_oper_exp']))+is_add['othr_inc/exp']
+    is_add['ebit'] = is_add['ebitda']-items['depamor']
+    is_add['dps'] = items['ncfdiv']/is_add['dil_share_cal_eps_b']
+
+    #Profit and loss historical ratios
+    pl_ratios = pd.DataFrame()
+    pl_ratios['calendardate'] =bs['calendardate']
+    pl_ratios['cogs/sales%'] = (items['cor']/items['revenue'])
+    pl_ratios['sgna/sales%'] = (items['sgna']/items['revenue'])
+    pl_ratios['total_costs/sales%'] = pl_ratios['cogs/sales%'] + pl_ratios['sgna/sales%']
+    pl_ratios['othr_opr_exp/sales%'] = (is_add['othr_oper_exp']/items['revenue'])
+    pl_ratios['dep/gross_fix_asset%'] = (items['depamor']/bs_extra['ppegross'].astype(float))
+    pl_ratios['int_exp/avg_debt'] = (items.iloc[6,42]/((bs_add.iloc[6,7]+bs_add.iloc[5,7])/2))
+    pl_ratios.at[5,'int_exp/avg_debt'] = (items.iloc[5,42]/((bs_add.iloc[5,7]+bs_add.iloc[4,7])/2))
+    pl_ratios.at[4,'int_exp/avg_debt'] = (items.iloc[4,42]/((bs_add.iloc[4,7]+bs_add.iloc[3,7])/2))
+    pl_ratios.at[3,'int_exp/avg_debt'] = (items.iloc[3,42]/((bs_add.iloc[3,7]+bs_add.iloc[2,7])/2))
+    pl_ratios.at[2,'int_exp/avg_debt'] = (items.iloc[2,42]/((bs_add.iloc[2,7]+bs_add.iloc[1,7])/2))
+    pl_ratios.at[1,'int_exp/avg_debt'] = (items.iloc[1,42]/((bs_add.iloc[1,7]+bs_add.iloc[0,7])/2))
+    pl_ratios.at[0,'int_exp/avg_debt'] = None
+    pl_ratios['inc_tax/pretax_inc'] = (items['taxexp']/is_add['pretax_inc'])
+    pl_ratios['min_int/(pretax_inc-tax)'] = items['netincnci']/(is_add['pretax_inc']-items['taxexp'])
+    pl_ratios['div/net_inc'] = items['ncfdiv']/is_add['net_inc']
+    pl_ratios['dep/(net_asst+capx)'] = (items.iloc[6,97]/(items.iloc[5,28]-items.iloc[6,96]))
+    pl_ratios.at[5,'dep/(net_asst+capx)'] = (items.iloc[5,97]/(items.iloc[4,28]-items.iloc[5,96]))
+    pl_ratios.at[4,'dep/(net_asst+capx)'] = (items.iloc[4,97]/(items.iloc[3,28]-items.iloc[4,96]))
+    pl_ratios.at[3,'dep/(net_asst+capx)'] = (items.iloc[3,97]/(items.iloc[2,28]-items.iloc[3,96]))
+    pl_ratios.at[2,'dep/(net_asst+capx)'] = (items.iloc[2,97]/(items.iloc[1,28]-items.iloc[2,96]))
+    pl_ratios.at[1,'dep/(net_asst+capx)'] = (items.iloc[1,97]/(items.iloc[0,28]-items.iloc[1,96]))
+    pl_ratios.at[0,'dep/(net_asst+capx)'] = None
+    pl_ratios['ebit_margin'] = items['ebit']/items['revenue']
+    pl_ratios['sales_growth_yoy'] = (items.iloc[6,51]/items.iloc[5,51])-1
+    pl_ratios.at[5,'sales_growth_yoy'] = (items.iloc[5,51]/items.iloc[4,51])-1
+    pl_ratios.at[4,'sales_growth_yoy'] = (items.iloc[4,51]/items.iloc[3,51])-1
+    pl_ratios.at[3,'sales_growth_yoy'] = (items.iloc[3,51]/items.iloc[2,51])-1
+    pl_ratios.at[2,'sales_growth_yoy'] = (items.iloc[2,51]/items.iloc[1,51])-1
+    pl_ratios.at[1,'sales_growth_yoy'] = (items.iloc[1,51]/items.iloc[0,51])-1
+    pl_ratios.at[0,'sales_growth_yoy'] = None
+    pl_ratios['Nominal_GDP_growth_yoy'] = [0.044,0.041,0.028,0.043,0.055,0.040,-0.023]
+    #pl_ratios[6,'sales_growth/GDP'] = pl_ratios.iloc[6,12]/pl_ratios.iloc[6,13]
+
+    # Cost of Debt
+    cod =[]
+    cod = pd.DataFrame(columns=['cost_of_debt','values'])
+    cod.iloc[:,0] = ['curr_year_int_exp','curr_year_debt','prev_year_debt','avg_debt','final_value']
+    cod.iloc[0,1] = items.iloc[6,42]
+    cod.iloc[1,1] = bs_add.iloc[6,7]
+    cod.iloc[2,1] = bs_add.iloc[5,7]
+    cod.iloc[3,1] = (int(cod.iloc[1,1]) + int(cod.iloc[2,1]))/2
+    cod.iloc[4,1] = cod.iloc[0,1]/cod.iloc[3,1]
+
+
+    #Balance Sheet historical ratios
+    bs_ratios = pd.DataFrame([])
+    bs_ratios['calendardate'] = bs['calendardate']
+    bs_ratios['receivables/sales'] = items['receivables']/items['revenue']
+    bs_ratios['inventory/sales'] = items['inventory']/items['revenue']
+    bs_ratios['invst_curr/sales'] = items['investmentsc']/items['revenue']
+    bs_ratios['othr_curr_asset/sales'] = bs_add['other_curr_assets']/items['revenue']
+    bs_ratios['oper_curr_asset/sales'] = items['assetsc']/items['revenue']
+    bs_ratios['PPE_G/asset(Prev Yr)'] = int(bs_extra.iloc[6,2])/items.iloc[5,6]
+    bs_ratios.at[5,'PPE_G/asset(Prev Yr)'] = int(bs_extra.iloc[5,2])/items.iloc[4,6]
+    bs_ratios.at[4,'PPE_G/asset(Prev Yr)'] = int(float(bs_extra.iloc[4,2]))/items.iloc[3,6]
+    bs_ratios.at[3,'PPE_G/asset(Prev Yr)'] = int(float(bs_extra.iloc[3,2]))/items.iloc[2,6]
+    bs_ratios.at[2,'PPE_G/asset(Prev Yr)'] = int(float(bs_extra.iloc[2,2]))/items.iloc[1,6]
+    bs_ratios.at[1,'PPE_G/asset(Prev Yr)'] = int(float(bs_extra.iloc[1,2]))/items.iloc[0,6]
+    bs_ratios.at[0,'PPE_G/asset(Prev Yr)'] = None
+    bs_ratios['annual_dep/PPE_N'] = items['depamor']/items['ppnenet']
+    bs_ratios['PPE_N/asset(Prev Yr)'] = items.iloc[6,28]/items.iloc[5,6]
+    bs_ratios.at[5,'PPE_N/asset(Prev Yr)'] = items.iloc[5,28]/items.iloc[4,6]
+    bs_ratios.at[4,'PPE_N/asset(Prev Yr)'] = items.iloc[4,28]/items.iloc[3,6]
+    bs_ratios.at[3,'PPE_N/asset(Prev Yr)'] = items.iloc[3,28]/items.iloc[2,6]
+    bs_ratios.at[2,'PPE_N/asset(Prev Yr)'] = items.iloc[2,28]/items.iloc[1,6]
+    bs_ratios.at[1,'PPE_N/asset(Prev Yr)'] = items.iloc[1,28]/items.iloc[0,6]
+    bs_ratios.at[0,'PPE_N/asset(Prev Yr)'] = None
+    bs_ratios['dividend_as_%_of_cash'] = items['ncfdiv']/(cf_add['net_chng_cash'] -items['ncfdiv'])
+    bs_ratios['othr_asset/sales'] = bs_add['other_assets']/items['revenue']
+    bs_ratios['payables/sales'] = items['payables']/items['revenue']
+    bs_ratios['othr_curr_liab/sales'] = bs_add['other_curr_liab']/items['revenue']
+    bs_ratios['oper_curr_liab/sales'] = bs_ratios['payables/sales']+bs_ratios['othr_curr_liab/sales']
+    bs_ratios['debt/equity'] = bs_add['debt']/items['equity']
+    bs_ratios['debt/tot_asset'] = bs_add['debt']/items['assets']
+    bs_ratios['othr_liab/sales'] = bs_add['other_liab']/items['revenue']
+    bs_ratios['debt_curr/assets'] = items['debtc']/items['assets']
+    bs_ratios['debt_non-curr/assets'] = bs_add['debt']/items['assets']
+    bs_ratios['deff_rev/sales'] = items['deferredrev']/items['revenue']
+    bs_ratios['deff_tax/sales'] = items['taxliabilities']/items['revenue']
+
+    #############################################################
+    #############################################################
+    #ASSUMPTIONS
+
+    assumptions = []
+    assumptions = pd.DataFrame(columns=['Assumptions%(Excluding CAPEX )','5 Year Avg','2021E','2022E','2023E','2024E','2025E','2026E'])
+    assumptions.iloc[:,0] = fields
+    assumptions.iloc[0,1] = (items.iloc[6,51]/items.iloc[5,51])-1 #Ammend
+    assumptions.iloc[1,1] = np.average(pl_ratios['cogs/sales%'])
+    assumptions.iloc[2,1] = np.average(pl_ratios['sgna/sales%'])
+    assumptions.iloc[3,1] = np.average(pl_ratios['othr_opr_exp/sales%'])
+    assumptions.iloc[4,1] = np.average(pl_ratios.iloc[1:7,10])
+    #assumptions.iloc[5,1] = round((np.average(pl_ratios['ebitda_margin']))*100)
+    #assumptions.iloc[6,1] = round((np.average(pl_ratios['ebit_margin']))*100)
+    assumptions.iloc[5,1] = np.average(pl_ratios.iloc[1:7,6])
+    assumptions.iloc[5,2] = cod.iloc[4,1]
+    assumptions.iloc[6,1] = pl_ratios.iloc[6,8]
+    assumptions.iloc[7,1] = (((is_add.iloc[6,12]/is_add.iloc[2,12])**(1/4))-1)
+    assumptions.iloc[8,1] = np.average(pl_ratios['inc_tax/pretax_inc'])
+    assumptions.iloc[9,1] = np.average(bs_ratios['dividend_as_%_of_cash'])
+    assumptions.iloc[10,1] = np.average(bs_ratios['receivables/sales'])
+    assumptions.iloc[11,1] = np.average(bs_ratios['inventory/sales'])
+    assumptions.iloc[12,1] = np.average(bs_ratios['invst_curr/sales'])
+    assumptions.iloc[13,1] = np.average(bs_ratios['othr_curr_asset/sales'])
+    assumptions.iloc[14,1] = np.average(bs_ratios.iloc[1:7, 6])
+    assumptions.iloc[15,1] = (bs_add.iloc[6,5]/bs_add.iloc[5,5])-1
+    assumptions.iloc[16,1] = (((items.iloc[6,6]/items.iloc[2,6])**(1/4))-1)
+    assumptions.iloc[17,1] = (-np.average(items['capex']))
+    assumptions.iloc[18,1] = np.average(bs_ratios['payables/sales'])
+    assumptions.iloc[19,1] = np.average(bs_ratios['othr_curr_liab/sales'])
+    assumptions.iloc[20,1] = np.average(bs_ratios['debt_curr/assets'])
+    assumptions.iloc[21,1] = np.average(bs_ratios['debt_non-curr/assets'])
+    assumptions.iloc[22,1] = np.average(bs_ratios['deff_rev/sales'])
+    assumptions.iloc[23,1] = np.average(bs_ratios['deff_tax/sales'])
+    assumptions.iloc[24,1] = (bs_add.iloc[6,8]/bs_add.iloc[5,8])-1
+    assumptions.iloc[25,1] = (((items.iloc[6,24]/items.iloc[2,24])**(1/4))-1)
+
+
+    for i in range(len(assumptions)):
+        if i != 5:
+            assumptions.iloc[i,2:8] = assumptions.iloc[i,1]
+    assumptions.iloc[5,3:8] = assumptions.iloc[5,2]
+
+    for i in range(len(assumptions)):
+        if i != 17:
+            assumptions.iloc[i,1:] = assumptions.iloc[i,1:]*100
+
+    assumptions.iloc[:,1:] = assumptions.iloc[:,1:].applymap(lambda x: round(x,2))
+    #print(bs_add,assumptions,bs_ratios,cf_add,cod,is_add,pl_ratios)
+    return bs_add,assumptions,bs_ratios,cf_add,cod,is_add,pl_ratios
+
+tickers = ['AAPL','ADBE','NVDA']
+
+#[calculations(tick) for tick in tickers]
+
+a,b,c,d,e,f,g = calculations('AAPL')
+
+
+
+
+
+
