@@ -1,0 +1,116 @@
+import pandas as pd
+import numpy as np
+import mysql.connector
+import warnings
+import time
+
+start_time = time.time()
+warnings.filterwarnings('ignore')
+
+config = {
+    'host': 'los-test-db.mysql.database.azure.com',
+    'user': 'csladmin@los-test-db',
+    'password': 'csLabs$2019',
+    'database': 'quandl'}
+
+
+class db_connection():
+
+    def __init__(self, config):
+        self.config = config
+
+    def connect(self):
+        self.db = mysql.connector.connect(**self.config)
+        if self.db:
+            print("Connection Successful")
+        else:
+            print("Connection Failed")
+        self.cursor = self.db.cursor(dictionary=True)
+
+
+db = db_connection(config)
+
+tick = 'CAT'
+
+
+def price(cursor,table,dropped =True):
+    cursor.execute(f"SELECT ID,calendardate,unadj_close FROM {table} WHERE calendardate between '2015-01-01' and '2020-12-31'")
+    df1 = pd.DataFrame(cursor.fetchall())
+    if dropped:
+        df1 = df1.drop('ID',axis='columns')
+    return df1
+
+
+def price_call(cursor, table, tick, dropped=True):
+    cursor.execute(f"SELECT * FROM {table} WHERE ticker = '{tick}'")
+    df = pd.DataFrame(cursor.fetchall())
+    if dropped:
+        df = df.drop('Index', axis='columns')
+    return df.iloc[12:, ].reset_index(drop=True)
+
+
+db.connect()
+sp500_price = price(db.cursor, 'sp500_price')
+price_avg, price_max = price_call(db.cursor, 'sep_avg', tick), price_call(db.cursor, 'sep_max', tick)
+
+
+# Time For Fetching Data from SQL DB
+seconds = time.time() - start_time
+print('Time Taken for Fetching Data:', time.strftime("%H:%M:%S", time.gmtime(seconds)))
+
+# Equity Beta
+# Calculate Return
+
+sp500_price['return'] = None
+for i in range(len(sp500_price.calendardate)-1):
+    sp500_price['return'].iloc[i] = np.log(sp500_price.iloc[i+1, 1]/sp500_price.iloc[i, 1])
+
+sp500_price['return'] = sp500_price['return'].shift(periods=1)
+
+price_avg['return'] = None
+for i in range(len(price_avg.calendardate)-1):
+    price_avg['return'].iloc[i] = np.log(price_avg.iloc[i+1, 2]/price_avg.iloc[i, 2])
+
+price_avg['return'] = price_avg['return'].shift(periods=1)
+
+price_max['return'] = None
+for i in range(len(price_max.calendardate)-1):
+    price_max['return'].iloc[i] = np.log(price_max.iloc[i+1, 2]/price_max.iloc[i, 2])
+
+price_max['return'] = price_max['return'].shift(periods=1)
+
+# Calculate Mean
+# price_max['return'].dropna().mean()
+# price_avg['return'].dropna().mean()
+# sp500_price['return'].dropna().mean()
+
+sp500_price['x-xmean'] = sp500_price['return']-sp500_price['return'].dropna().mean()
+price_avg['y-ymean'] = price_avg['return']-price_avg['return'].dropna().mean()
+price_max['y-ymean'] = price_max['return']-price_max['return'].dropna().mean()
+
+# price_max.to_excel(r'C:\Users\syntronic\Desktop\SEP_Test Files\max.xlsx')
+# price_avg.to_excel(r'C:\Users\syntronic\Desktop\SEP_Test Files\avg.xlsx')
+# sp500_price.to_excel(r'C:\Users\syntronic\Desktop\SEP_Test Files\sp500.xlsx')
+
+price_new = pd.DataFrame()
+price_new['calendardate'] = price_avg['calendardate']
+price_new['covariance_avg'] = sp500_price['x-xmean'] * price_avg['y-ymean']
+price_new['covariance_max'] = sp500_price['x-xmean'] * price_max['y-ymean']
+price_new['variance'] = sp500_price['x-xmean']**2
+
+sxy1 = np.sum(price_new['covariance_avg'])
+sxy2 = np.sum(price_new['covariance_max'])
+sxx = np.sum(price_new['variance'])
+
+beta_avg = sxy1/sxx
+intercept_avg = price_avg['return'].dropna().mean() - beta_avg * sp500_price['return'].dropna().mean()
+
+beta_max = sxy2/sxx
+intercept_max = price_max['return'].dropna().mean() - beta_max * sp500_price['return'].dropna().mean()
+
+# Time For Final Completion
+seconds = time.time() - start_time
+print('Time Taken for Final Completion:', time.strftime("%H:%M:%S", time.gmtime(seconds)))
+print('Selected Company Ticker:', tick)
+
+print(beta_avg,beta_max)
