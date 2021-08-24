@@ -1,0 +1,178 @@
+import quandl
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+import sklearn.model_selection as model_selection
+
+from keras.models import Sequential
+from keras.layers import Dense
+from keras.layers import LSTM
+from keras.layers import Dropout
+from keras.callbacks import EarlyStopping
+from keras.losses import mean_squared_error
+
+import time
+import warnings
+warnings.filterwarnings('ignore')
+
+start_time = time.time()
+
+# Grabbing the data from Quandl
+quandl.ApiConfig.api_key = "SpxSuXCvQRpcCKz1vbSy"
+
+def grab_quandl(ticker,type):
+    data = quandl.get_table('SHARADAR/SF1', ticker=ticker,paginate=True)
+    data = data[data['dimension'] == type]
+    return data
+
+# Parameters for model running
+start_date = '2000-01-01'
+end_date = '2019-12-31'
+timestep = 12
+
+
+# List of companies to add
+tickers = ['HD', 'BBBY', 'WMT', 'TGT', 'COST', 'KSS', 'LOW']
+selected_companies = grab_quandl(tickers, 'MRQ')
+
+dependent_company = 'HD'
+
+
+# Selecting Data within specified date range
+input_data = selected_companies[(selected_companies.calendardate >= start_date) & (selected_companies.calendardate <= end_date)]
+
+input_data = input_data[['ticker','calendardate','assets','cashneq','investments','investmentsc','investmentsnc',
+                         'deferredrev','deposits','ppnenet','inventory','taxassets','receivables','payables',
+                         'intangibles','liabilities','equity','retearn','accoci','assetsc','assetsnc','liabilitiesc',
+                         'liabilitiesnc','taxliabilities','debt','dps','debtc','debtnc','revenue','cor','sgna','rnd',
+                         'opex','intexp','taxexp','netincdis','consolinc','netincnci','netinc','prefdivis','netinccmn',
+                         'ebit','gp','opinc','capex','ncfbus','ncfinv','ncff','ncfdebt','ncfcommon','ncfdiv',
+                         'ncfi','ncfo','ncfx','ncf','sbcomp','depamor','sharesbas','shareswa','price',
+                         'marketcap']]
+
+
+
+
+#ticker = 'LOW'
+# For loop to create formatted time series input data
+model_data = []
+for ticker in input_data.ticker.unique():
+
+    # Selecting data for specified company and sorting by date
+    company_data = input_data[input_data['ticker'] == ticker]
+    company_data = company_data.sort_values(['calendardate'], ascending='True').reset_index(drop=True)
+
+    # Filling missing shares outstanding values with weighted average
+    company_data.shareswa.ffill(inplace=True)
+    company_data.sharesbas.fillna(company_data.shareswa, inplace=True)
+
+    # Calculate dividend and selecting variables for input
+    company_data['dividend'] = company_data.loc[:, 'dps'] * company_data.loc[:, 'sharesbas']
+    company_data.marketcap.fillna(company_data.sharesbas * company_data.price, inplace=True)
+
+
+    # Scaling all values to market cap and dropping unwanted columns
+    marketcap = company_data['marketcap'].values
+    company_data.drop(['ticker', 'marketcap', 'shareswa', 'price', 'dps'], axis=1, inplace=True)
+    company_data.iloc[:, 1:] = company_data.iloc[:, 1:].div(marketcap, axis=0)
+
+    # Filling any left over na values with 0
+    company_data.fillna(0, inplace=True)
+
+    # Renaming the company for prediction revenue to y_true
+    if ticker == dependent_company:
+       company_data.rename({'revenue': 'y_true'}, axis=1, inplace=True)
+
+    if len(model_data) == 0:
+        model_data = company_data
+    else:
+        model_data = model_data.merge(company_data, how='left', on='calendardate')
+
+
+# Train Test Split
+train, test = model_selection.train_test_split(model_data, test_size=0.20, shuffle=False)
+
+
+# Scaling the train and test data
+scaler = MinMaxScaler(feature_range=(0,1))
+scaled_ts_train = train.copy()
+scaled_ts_train.iloc[:,1:] = scaler.fit_transform(scaled_ts_train.iloc[:,1:])
+
+scaled_ts_test = test.copy()
+scaled_ts_test.iloc[:,1:] = scaler.transform(scaled_ts_test.iloc[:,1:])
+
+
+# Separating out the y_true from the scaled data
+index_no = scaled_ts_train.columns.get_loc('y_true')
+y_train_col = scaled_ts_train.iloc[:, index_no]
+scaled_ts_train.drop(scaled_ts_train.columns[[0, index_no]], axis=1, inplace=True)
+y_test_col = scaled_ts_test.iloc[:, index_no]
+scaled_ts_test.drop(scaled_ts_test.columns[[0, index_no]], axis=1, inplace=True)
+
+
+# Create data structure with n timesteps and 1 output
+x_train = []
+y_train = []
+
+for i in (range(len(scaled_ts_train) - timestep)):
+    x_train.append(scaled_ts_train.iloc[i:i+timestep,0:].values)
+    y_train.append(y_train_col.iloc[i + timestep])
+
+x_test = []
+y_test = []
+for i in (range(len(scaled_ts_test) - timestep)):
+    x_test.append(scaled_ts_test.iloc[i:i + timestep, 0:].values)
+    y_test.append(y_test_col.iloc[i + timestep])
+
+
+# Converting x_train and y_train to arrays
+input_shape = (len(train) - timestep), timestep, len(scaled_ts_train.columns)
+x_train = np.asarray(x_train)
+if x_train.shape != ((len(train) - timestep), timestep, len(scaled_ts_train.columns)):
+    raise ValueError('X train shape is the wrong shape')
+
+y_train = np.asarray(y_train)
+
+
+# Converting x_test and y_test to arrays
+x_test = np.asarray(x_test)
+y_test = np.asarray(y_test)
+
+
+## LSTM Architechture ##
+# Initialising the LSTM
+regressor = Sequential()
+
+# Adding the 1st LSTM layer
+regressor.add(LSTM(units=15, activation='relu', return_sequences=True, input_shape=(input_shape[1], input_shape[2])))
+
+# Adding 2nd LSTM layer
+regressor.add(LSTM(units=15, activation='relu'))
+
+# Adding the output layer
+regressor.add(Dense(1))
+regressor.summary()
+
+# Complying the LSTM and adding early stopping
+regressor.compile(optimizer = 'adam', loss = 'mean_squared_error')
+
+earlyStop = EarlyStopping(monitor="val_loss", verbose=2, mode='min', patience=3)
+
+
+# Training the model
+history = regressor.fit(x_train, y_train, epochs = 40, shuffle=False,validation_data=(x_test,y_test),callbacks=[earlyStop])
+
+
+# Trying to predict on y_test
+y_pred = regressor.predict(x_test)
+loss = mean_squared_error(y_test, y_pred)
+
+
+# LOSS PLOT
+plt.plot(history.history['loss'],label ='train')
+plt.plot(history.history['val_loss'],label ='validation')
+plt.legend();
+
+
+# Runtime
+print(round(((time.time() - start_time) / 60), 2), 'minutes')
